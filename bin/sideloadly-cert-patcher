@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+sideloadly-cert-patcher
+~~~~~~~~~~~~~~~~~~~~~~~
+Creates a standalone patched `Sideloadly-Cert.app` bundle (or patches a target bundle
+with automatic backup) by compiling `src/sideloadly_dylib_proxy.mm` into an x86_64
+Mach-O dylib, relocating the original `Frameworks/sideloadly.dylib` to
+`Frameworks/sideloadly_orig.dylib`, installing `src/sideloadly_cert_hook.py` into
+`Frameworks/`, and ad-hoc signing the resulting `.app` bundle.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+
+
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
+SRC_DIR = PROJECT_ROOT / "src"
+PROXY_MM = SRC_DIR / "sideloadly_dylib_proxy.mm"
+HOOK_PY = SRC_DIR / "sideloadly_cert_hook.py"
+
+
+def build_proxy_dylib(output_dylib: pathlib.Path, frameworks_dir: Optional[pathlib.Path] = None) -> None:
+    """Compile `sideloadly_dylib_proxy.mm` as an x86_64 Mach-O dynamic library."""
+    fw_search = frameworks_dir or output_dylib.parent
+    cmd = [
+        "/usr/bin/clang++",
+        "-arch",
+        "x86_64",
+        "-dynamiclib",
+        "-std=c++17",
+        "-fobjc-arc",
+        "-framework",
+        "Cocoa",
+        f"-F{fw_search}",
+        "-framework",
+        "QtWidgets",
+        "-framework",
+        "QtGui",
+        "-framework",
+        "QtCore",
+        "-Wl,-rpath,@executable_path/../Frameworks",
+        "-Wl,-undefined,dynamic_lookup",
+        "-install_name",
+        "@executable_path/../Frameworks/sideloadly.dylib",
+        str(PROXY_MM),
+        "-o",
+        str(output_dylib),
+    ]
+    subprocess.run(cmd, check=True)
+
+
+def patch_app_bundle(
+    source_app: pathlib.Path,
+    target_app: pathlib.Path,
+    in_place: bool = False,
+) -> pathlib.Path:
+    source_app = source_app.expanduser().resolve()
+    if not source_app.is_dir():
+        raise FileNotFoundError(f"Source app bundle not found: {source_app}")
+
+    if not in_place:
+        target_app = target_app.expanduser().resolve()
+        if target_app.exists():
+            shutil.rmtree(target_app)
+        shutil.copytree(source_app, target_app, symlinks=True)
+    else:
+        target_app = source_app
+
+    fw_dir = target_app / "Contents" / "Frameworks"
+    orig_dylib = fw_dir / "sideloadly_orig.dylib"
+    active_dylib = fw_dir / "sideloadly.dylib"
+    hook_dest = fw_dir / "sideloadly_cert_hook.py"
+
+    if not active_dylib.exists() and not orig_dylib.exists():
+        raise FileNotFoundError(f"sideloadly.dylib not found in {fw_dir}")
+
+    # Preserve original `sideloadly.dylib` as `sideloadly_orig.dylib`
+    if not orig_dylib.exists():
+        shutil.move(str(active_dylib), str(orig_dylib))
+
+    # Compile proxy dylib into `Frameworks/sideloadly.dylib`
+    build_proxy_dylib(active_dylib)
+
+    # Install Python certificate hook into `Frameworks/sideloadly_cert_hook.py`
+    shutil.copy2(HOOK_PY, hook_dest)
+
+    # Clear quarantine attributes and ad-hoc sign the modified binaries & app bundle
+    subprocess.run(["/usr/bin/xattr", "-cr", str(target_app)], check=False)
+    subprocess.run(
+        ["/usr/bin/codesign", "--force", "--sign", "-", str(orig_dylib)],
+        check=True,
+    )
+    subprocess.run(
+        ["/usr/bin/codesign", "--force", "--sign", "-", str(active_dylib)],
+        check=True,
+    )
+    subprocess.run(
+        ["/usr/bin/codesign", "--force", "--deep", "--sign", "-", str(target_app)],
+        check=True,
+    )
+    return target_app
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Build or patch Sideloadly.app with local Apple Developer Certificate (.p12 + .mobileprovision) signing."
+    )
+    parser.add_argument(
+        "--source",
+        default="/Applications/Sideloadly.app",
+        help="Path to original Sideloadly.app (default: /Applications/Sideloadly.app)",
+    )
+    parser.add_argument(
+        "--output",
+        default=str(PROJECT_ROOT / "build" / "Sideloadly-Cert.app"),
+        help="Output path for patched Sideloadly-Cert.app",
+    )
+    parser.add_argument(
+        "--in-place",
+        action="store_true",
+        help="Patch the source app bundle in place (backs up sideloadly.dylib to sideloadly_orig.dylib)",
+    )
+    args = parser.parse_args()
+
+    out_path = pathlib.Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    patched = patch_app_bundle(
+        source_app=pathlib.Path(args.source),
+        target_app=out_path,
+        in_place=args.in_place,
+    )
+    print(f"[+] Patched Sideloadly bundle ready at: {patched}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,34 @@
+# Never commit certificates, provisioning profiles, passwords, or IPAs
+*.p12
+*.pfx
+*.pem
+*.key
+*.cer
+*.crt
+*.der
+*.mobileprovision
+*.provisionprofile
+*PASSWORD*
+*password*
+*.ipa
+*.app/
+*.dylib
+*.so
+*.o
+
+# Environment & secrets
+.env
+.env.*
+config.json
+.sideloadly-cert/
+
+# Python / build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+.DS_Store
+

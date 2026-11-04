@@ -1,0 +1,418 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+sideloadly-cert-sign
+~~~~~~~~~~~~~~~~~~~~
+CLI & verification tool for Apple Developer Certificate (.p12 + .mobileprovision)
+IPA signing. Supports two backends:
+  1. `sideloadly`: Drives the patched Sideloadly v0.72 native `GuiImpactor` + `signpipe`
+     engine in-process via an x86_64 C/Python bridge.
+  2. `zsign`: Drives `/opt/homebrew/bin/zsign` directly using the same `.p12`,
+     `.mobileprovision`, and password resolution logic.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pathlib
+import plistlib
+import shutil
+import subprocess
+import sys
+import tempfile
+import zipfile
+from typing import Any, Dict, Optional
+
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+import sideloadly_cert_hook as cert_hook  # noqa: E402
+
+
+def verify_signed_ipa(ipa_path: pathlib.Path) -> Dict[str, Any]:
+    """
+    Extract and verify the code signature, embedded.mobileprovision, and entitlements
+    of a signed `.ipa` archive using macOS `codesign` and `security cms`.
+    """
+    ipa_path = ipa_path.expanduser().resolve()
+    if not ipa_path.is_file():
+        raise FileNotFoundError(f"IPA file not found: {ipa_path}")
+
+    with tempfile.TemporaryDirectory(prefix="sl_verify_") as tmp:
+        tmp_dir = pathlib.Path(tmp)
+        with zipfile.ZipFile(ipa_path, "r") as zf:
+            zf.extractall(tmp_dir)
+
+        payload_dir = tmp_dir / "Payload"
+        apps = list(payload_dir.glob("*.app")) if payload_dir.is_dir() else []
+        if not apps:
+            raise ValueError(f"No Payload/*.app found inside {ipa_path}")
+
+        app_dir = apps[0]
+        info_plist_path = app_dir / "Info.plist"
+        info_plist = (
+            plistlib.loads(info_plist_path.read_bytes()) if info_plist_path.is_file() else {}
+        )
+
+        # Verify signature metadata via `codesign -dvvv`
+        cs_proc = subprocess.run(
+            ["/usr/bin/codesign", "-dvvv", str(app_dir)],
+            capture_output=True,
+            text=True,
+        )
+        cs_details = (cs_proc.stderr or "") + (cs_proc.stdout or "")
+
+        # Extract signed entitlements via `codesign -d --entitlements :-`
+        ent_proc = subprocess.run(
+            ["/usr/bin/codesign", "-d", "--entitlements", ":-", str(app_dir)],
+            capture_output=True,
+        )
+        signed_entitlements: Dict[str, Any] = {}
+        if ent_proc.returncode == 0 and ent_proc.stdout:
+            try:
+                signed_entitlements = plistlib.loads(ent_proc.stdout)
+            except Exception:
+                pass
+
+        # Inspect embedded.mobileprovision
+        emb_prov = app_dir / "embedded.mobileprovision"
+        prov_meta: Dict[str, Any] = {}
+        if emb_prov.is_file():
+            p_plist = cert_hook.parse_mobileprovision_bytes(emb_prov.read_bytes())
+            prov_meta = {
+                "name": p_plist.get("Name"),
+                "team_name": p_plist.get("TeamName"),
+                "team_id": (p_plist.get("TeamIdentifier") or [None])[0],
+                "uuid": p_plist.get("UUID"),
+                "provisioned_devices": p_plist.get("ProvisionedDevices") or [],
+            }
+
+        authorities = [
+            ln.split("=", 1)[1].strip()
+            for ln in cs_details.splitlines()
+            if ln.startswith("Authority=")
+        ]
+        team_identifier = next(
+            (
+                ln.split("=", 1)[1].strip()
+                for ln in cs_details.splitlines()
+                if ln.startswith("TeamIdentifier=")
+            ),
+            None,
+        )
+
+        return {
+            "ipa_path": str(ipa_path),
+            "app_bundle": app_dir.name,
+            "bundle_id": info_plist.get("CFBundleIdentifier"),
+            "bundle_name": info_plist.get("CFBundleName") or info_plist.get("CFBundleDisplayName"),
+            "codesign_valid": cs_proc.returncode == 0 and len(authorities) > 0,
+            "authorities": authorities,
+            "team_identifier": team_identifier,
+            "embedded_profile": prov_meta,
+            "entitlements": signed_entitlements,
+        }
+
+
+def sign_ipa_with_zsign(
+    profile: cert_hook.CertBundleProfile,
+    input_ipa: pathlib.Path,
+    output_ipa: pathlib.Path,
+    bundle_id: Optional[str] = None,
+    bundle_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Sign an IPA using `/opt/homebrew/bin/zsign` and the resolved certificate profile."""
+    zsign_bin = shutil.which("zsign") or "/opt/homebrew/bin/zsign"
+    if not pathlib.Path(zsign_bin).is_file():
+        raise FileNotFoundError("zsign binary not found at /opt/homebrew/bin/zsign")
+
+    _, _, matched_pw = profile.load_credentials()
+    output_ipa.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        zsign_bin,
+        "-k",
+        str(profile.p12_path),
+        "-m",
+        str(profile.prov_path),
+        "-o",
+        str(output_ipa),
+        "-z",
+        "6",
+    ]
+    if matched_pw:
+        cmd.extend(["-p", matched_pw])
+
+    if bundle_id:
+        cmd.extend(["-b", bundle_id])
+    elif profile.bundle_id_mode == "match_profile" and profile.profile_bundle_id and "*" not in profile.profile_bundle_id:
+        cmd.extend(["-b", profile.profile_bundle_id])
+
+    if bundle_name:
+        cmd.extend(["-n", bundle_name])
+
+    cmd.append(str(input_ipa))
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"zsign failed (exit {proc.returncode}): {proc.stderr or proc.stdout}")
+
+    return verify_signed_ipa(output_ipa)
+
+
+def sign_ipa_with_sideloadly_engine(
+    profile: cert_hook.CertBundleProfile,
+    input_ipa: pathlib.Path,
+    output_ipa: pathlib.Path,
+    app_bundle_path: Optional[pathlib.Path] = None,
+) -> Dict[str, Any]:
+    """
+    Sign an IPA using Sideloadly's embedded Python 3.8 + `sideloadly.dylib` (`GuiImpactor`
+    + `signpipe.process_ipa`) with `sideloadly_cert_hook` active.
+    """
+    candidates = [
+        app_bundle_path,
+        PROJECT_ROOT / "build" / "Sideloadly-Cert.app",
+        pathlib.Path("/Applications/Sideloadly.app"),
+    ]
+    chosen_app: Optional[pathlib.Path] = None
+    for c in candidates:
+        if c and pathlib.Path(c).is_dir():
+            chosen_app = pathlib.Path(c).resolve()
+            break
+    if chosen_app is None:
+        raise FileNotFoundError("Neither Sideloadly-Cert.app nor /Applications/Sideloadly.app found.")
+
+    input_ipa = input_ipa.expanduser().resolve()
+    output_ipa = output_ipa.expanduser().resolve()
+    output_ipa.parent.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="sl_engine_") as tmp:
+        tmp_dir = pathlib.Path(tmp)
+        macos_dir = tmp_dir / "MacOS"
+        macos_dir.mkdir(parents=True, exist_ok=True)
+        os.symlink(chosen_app / "Contents" / "Frameworks", tmp_dir / "Frameworks")
+
+        runner_c = tmp_dir / "runner.c"
+        runner_bin = macos_dir / "runner"
+        out_dir = tmp_dir / "out"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        runner_c.write_text(
+            r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <wchar.h>
+#include <dlfcn.h>
+
+typedef void (*Py_SetPath_t)(const wchar_t *);
+typedef void (*Py_Initialize_t)(void);
+typedef int (*PyRun_SimpleString_t)(const char *);
+
+int main(int argc, char **argv) {
+    const char *fw_dir = getenv("SL_FW_DIR");
+    const char *py_code = getenv("SL_PY_CODE");
+    if (!fw_dir || !py_code) return 2;
+
+    char py_dylib[1024];
+    snprintf(py_dylib, sizeof(py_dylib), "%s/Python", fw_dir);
+    void *h = dlopen(py_dylib, RTLD_NOW | RTLD_GLOBAL);
+    if (!h) { fprintf(stderr, "dlopen Python failed: %s\n", dlerror()); return 1; }
+
+    Py_SetPath_t set_path = (Py_SetPath_t)dlsym(h, "Py_SetPath");
+    Py_Initialize_t init = (Py_Initialize_t)dlsym(h, "Py_Initialize");
+    PyRun_SimpleString_t run_str = (PyRun_SimpleString_t)dlsym(h, "PyRun_SimpleString");
+
+    wchar_t wpath[2048];
+    char cpath[2048];
+    snprintf(cpath, sizeof(cpath), "%s/python38.zip:%s", fw_dir, fw_dir);
+    mbstowcs(wpath, cpath, 2048);
+    set_path(wpath);
+    init();
+    return run_str(py_code);
+}
+""",
+            encoding="utf-8",
+        )
+
+        subprocess.run(
+            ["/usr/bin/clang", "-arch", "x86_64", str(runner_c), "-o", str(runner_bin)],
+            check=True,
+        )
+
+        fw_dir = chosen_app / "Contents" / "Frameworks"
+        py_script = f"""
+import ctypes, sys, pathlib, shutil
+sys.path.insert(0, {str(PROJECT_ROOT / 'src')!r})
+sys.path.insert(0, {str(fw_dir)!r})
+
+class _DummyFFI:
+    NULL = None
+    def def_extern(self, *a, **kw):
+        return lambda fn: fn
+    def new(self, *a, **kw):
+        return None
+    def string(self, b):
+        return b
+    def buffer(self, *a, **kw):
+        return b""
+    def from_buffer(self, b):
+        return b
+    def __getattr__(self, name):
+        return lambda *a, **kw: None
+
+class _DummyLib:
+    def __getattr__(self, name):
+        return lambda *a, **kw: 0
+
+class _DummyMod:
+    ffi = _DummyFFI()
+    lib = _DummyLib()
+
+sys.modules['_sideloadly_mobdev'] = _DummyMod()
+sys.modules['_slpy'] = _DummyMod()
+
+dll = ctypes.PyDLL({str(fw_dir / 'sideloadly.dylib')!r})
+init_fn = dll.PyInit_sideloadly_wrap
+init_fn.restype = ctypes.py_object
+init_fn()
+
+import sideloadly_wrap
+import sideloadly_cert_hook
+
+sideloadly_cert_hook.install_sideloadly_hooks()
+
+def _cb_log(*a): pass
+def _cb_ask(*a): return ""
+def _cb_disp(*a): return b""
+
+sideloadly_wrap.callbacks(_cb_log, _cb_ask, _cb_disp, _cb_disp, _cb_disp, _cb_disp)
+
+prof = sideloadly_cert_hook.CertBundleProfile(
+    name={profile.name!r},
+    p12_path=pathlib.Path({str(profile.p12_path)!r}),
+    prov_path=pathlib.Path({str(profile.prov_path)!r}),
+    password_file=pathlib.Path({str(profile.password_file)!r}) if {bool(profile.password_file)!r} else None,
+    bundle_id_mode={profile.bundle_id_mode!r},
+)
+
+res_path = sideloadly_wrap.run(
+    pathlib.Path({str(input_ipa)!r}),
+    "",
+    None,
+    prof.account_label,
+    {{}},
+    False,
+    3,
+    False,
+    None,
+    pathlib.Path({str(out_dir)!r}),
+    None,
+    None,
+    None,
+    None,
+    0,
+    None,
+    None,
+)
+out_files = list(pathlib.Path({str(out_dir)!r}).glob("*.ipa"))
+if not out_files:
+    raise RuntimeError("Sideloadly engine did not produce an output IPA")
+shutil.move(str(out_files[0]), {str(output_ipa)!r})
+"""
+        env = os.environ.copy()
+        env["SL_FW_DIR"] = str(fw_dir)
+        env["SL_PY_CODE"] = py_script
+
+        proc = subprocess.run([str(runner_bin)], env=env, capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"Sideloadly engine signing failed (exit {proc.returncode}):\n{proc.stderr}\n{proc.stdout}"
+            )
+
+    return verify_signed_ipa(output_ipa)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Inspect Apple Developer Certificates and sign/verify iOS IPAs using Sideloadly-Cert or zsign."
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_inspect = sub.add_parser("inspect", help="Inspect certificate folder or configured profiles")
+    p_inspect.add_argument(
+        "--cert-dir",
+        default=str(cert_hook.DEFAULT_CERT_FOLDER),
+        help="Path to certificate directory",
+    )
+
+    p_sign = sub.add_parser("sign", help="Sign an IPA with an Apple Developer Certificate")
+    p_sign.add_argument("--ipa", required=True, help="Input unsigned/signed .ipa path")
+    p_sign.add_argument("--output", required=True, help="Output signed .ipa path")
+    p_sign.add_argument(
+        "--cert-dir",
+        default=str(cert_hook.DEFAULT_CERT_FOLDER),
+        help="Folder containing .p12, .mobileprovision, and optional PASSWORD.txt",
+    )
+    p_sign.add_argument(
+        "--engine",
+        choices=("sideloadly", "zsign"),
+        default="sideloadly",
+        help="Signing backend to use (default: sideloadly)",
+    )
+    p_sign.add_argument(
+        "--bundle-id-mode",
+        choices=("keep_original", "match_profile"),
+        default="keep_original",
+        help="Whether to keep the original CFBundleIdentifier or replace with profile bundle ID",
+    )
+
+    p_verify = sub.add_parser("verify", help="Verify code signature and entitlements of an IPA")
+    p_verify.add_argument("ipa", help="Path to .ipa file")
+
+    args = parser.parse_args()
+
+    if args.cmd == "inspect":
+        prof = cert_hook.discover_cert_folder(pathlib.Path(args.cert_dir))
+        if prof is None:
+            print(json.dumps({"error": f"No certificate bundle found in {args.cert_dir}"}))
+            return 1
+        # Verify credential unlock without exposing password
+        prof.load_credentials()
+        meta = prof.to_metadata_dict()
+        meta["credentials_verified"] = True
+        print(json.dumps(meta, indent=2))
+        return 0
+
+    if args.cmd == "sign":
+        prof = cert_hook.discover_cert_folder(pathlib.Path(args.cert_dir))
+        if prof is None:
+            raise FileNotFoundError(f"No .p12 + .mobileprovision found in {args.cert_dir}")
+        prof.bundle_id_mode = args.bundle_id_mode
+
+        if args.engine == "sideloadly":
+            report = sign_ipa_with_sideloadly_engine(
+                profile=prof,
+                input_ipa=pathlib.Path(args.ipa),
+                output_ipa=pathlib.Path(args.output),
+            )
+        else:
+            report = sign_ipa_with_zsign(
+                profile=prof,
+                input_ipa=pathlib.Path(args.ipa),
+                output_ipa=pathlib.Path(args.output),
+            )
+        print(json.dumps(report, indent=2))
+        return 0
+
+    if args.cmd == "verify":
+        report = verify_signed_ipa(pathlib.Path(args.ipa))
+        print(json.dumps(report, indent=2))
+        return 0
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
