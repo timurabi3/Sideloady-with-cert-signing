@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- MANDATORY (modern-web-guidance dark-mode): Declare color-scheme in head to prevent FOUC -->
+    <meta name="color-scheme" content="dark" />
+    <title>Sideloadly-Cert · Native .p12 &amp; .mobileprovision Signing for Sideloadly macOS</title>
+    <meta
+      name="description"
+      content="Sign any iOS IPA inside Sideloadly v0.72 using your own Apple Developer .p12 certificate and .mobileprovision profile. Drag and drop under Advanced Options."
+    />
+    <meta property="og:title" content="Sideloadly-Cert · Native .p12 Certificate Signing for macOS" />
+    <meta
+      property="og:description"
+      content="Drop your .p12 and .mobileprovision directly into Sideloadly Advanced Options. No Apple ID login prompts, full entitlements, 365-day certificate validity."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="./assets/sideloadly-cert-overview.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&amp;family=Outfit:ital,wght@0,400;0,500;0,600;0,700;1,600&amp;display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <!-- Fixed Shrinking Header -->
+    <header class="site-header">
+      <div class="container header-inner">
+        <a href="#top" class="brand-mark">
+          <span class="brand-icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+              <path d="m9 12 2 2 4-4"></path>
+            </svg>
+          </span>
+          <span>Sideloadly-Cert</span>
+          <span class="brand-version">v0.72 · macOS</span>
+        </a>
+
+        <nav aria-label="Primary">
+          <ul class="nav-links">
+            <li><a href="#simulator"><span class="nav-index">01</span>Interactive Panel</a></li>
+            <li><a href="#architecture"><span class="nav-index">02</span>Signing Engine</a></li>
+            <li><a href="#comparison"><span class="nav-index">03</span>Why .p12 Mode</a></li>
+            <li><a href="#install"><span class="nav-index">04</span>Quick Install</a></li>
+          </ul>
+        </nav>
+
+        <a
+          href="https://github.com/timurabi3/Sideloady-with-cert-signing/releases/latest/download/Sideloadly-Cert-macOS.zip"
+          class="nav-cta-bracket"
+        >
+          <span class="led-dot" aria-hidden="true"></span>
+          <span>Download .app</span>
+        </a>
+      </div>
+    </header>
+
+    <main id="top">
+      <!-- SECTION 1: Split 50/50 Asymmetric Hero (Max 4 text elements, fits initial viewport) -->
+      <section class="hero-section">
+        <div class="container hero-grid">
+          <div class="hero-copy-col">
+            <!-- Element 1: Eyebrow (#1 of 2 allowed on page) -->
+            <div class="eyebrow-kicker">
+              <span class="led-dot" aria-hidden="true"></span>
+              <span>MACOS NATIVE QT5 DYLIB PROXY · V1.0.0</span>
+            </div>
+
+            <!-- Element 2: Headline -->
+            <h1 class="hero-headline">
+              Sign any IPA with your own <em>.p12</em> certificate.
+            </h1>
+
+            <!-- Element 3: Subtext (19 words, ≤4 lines) -->
+            <p class="hero-subtext">
+              Drop your Apple Developer <code>.p12</code> and <code>.mobileprovision</code> straight into Sideloadly Advanced Options. Zero Apple ID prompts, 365-day validity.
+            </p>
+
+            <!-- Element 4: CTA Row (1 Primary Hardware Button + 1 Secondary Source Link) -->
+            <div class="hero-cta-cluster">
+              <div class="cta-action-row">
+                <a
+                  href="https://github.com/timurabi3/Sideloady-with-cert-signing/releases/latest/download/Sideloadly-Cert-macOS.zip"
+                  class="hardware-download-btn"
+                >
+                  <span class="btn-main-label">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                      <polyline points="7 10 12 15 17 10"></polyline>
+                      <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                    <span>Download .app</span>
+                  </span>
+                  <span class="btn-badge-meta">61 MB · ZIP</span>
+                </a>
+
+                <a
+                  href="https://github.com/timurabi3/Sideloady-with-cert-signing"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="secondary-source-link"
+                >
+                  <span>View Source on GitHub</span>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                    <polyline points="12 5 19 12 12 19"></polyline>
+                  </svg>
+                </a>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right Column: Layered Depth Showcase (Higgsfield studio plate + real censored macOS screenshots) -->
+          <div class="hero-stage-wrapper">
+            <div class="stage-toolbar" role="tablist" aria-label="Screenshot view selector">
+              <div class="stage-tabs">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected="true"
+                  class="stage-tab active"
+                  data-view="overview"
+                >
+                  Full App Window
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected="false"
+                  class="stage-tab"
+                  data-view="panel"
+                >
+                  Certificate Drop Zone
+                </button>
+              </div>
+              <span class="stage-readout">Sideloadly! v0.72 · macOS Universal</span>
+            </div>
+
+            <div class="hero-layered-rig" id="hero-rig">
+              <img
+                src="./assets/hardware-studio-plate.jpg"
+                alt=""
+                class="studio-backdrop-plate"
+                fetchpriority="high"
+              />
+              <div class="studio-vignette" aria-hidden="true"></div>
+
+              <div class="window-showcase-frame">
+                <img
+                  id="hero-screenshot"
+                  src="./assets/sideloadly-cert-overview.png"
+                  alt="Sideloadly-Cert v0.72 full macOS window with Apple Developer Certificate panel expanded under Advanced Options"
+                  class="app-screenshot-img"
+                  width="996"
+                  height="1490"
+                />
+
+                <div class="stage-caption-bar">
+                  <span id="stage-caption-text">
+                    Full macOS window: Apple ID selector bound to local .p12 certificate
+                  </span>
+                  <span class="stage-caption-status">● PKCS#12 Verified</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- SECTION 2: Hardware Spec Strip (No Eyebrow) -->
+      <section class="spec-strip-section" aria-label="Technical specifications">
+        <div class="container">
+          <div class="spec-strip-grid">
+            <div class="spec-cell">
+              <div class="spec-label">CERTIFICATE VALIDITY</div>
+              <div class="spec-value">Up to 365 Days</div>
+              <div class="spec-note">Full Apple Developer &amp; Ad-Hoc profile lifespan</div>
+            </div>
+            <div class="spec-cell">
+              <div class="spec-label">APPLE ID 2FA LOGIN</div>
+              <div class="spec-value">0 Prompts</div>
+              <div class="spec-note">Bypasses Anisette &amp; Apple account password dialogs</div>
+            </div>
+            <div class="spec-cell">
+              <div class="spec-label">SIGNING PIPELINE</div>
+              <div class="spec-value">Native codesign</div>
+              <div class="spec-note">Recursive Mach-O signing for Frameworks &amp; PlugIns</div>
+            </div>
+            <div class="spec-cell">
+              <div class="spec-label">PLATFORM TARGET</div>
+              <div class="spec-value">macOS 12.0+</div>
+              <div class="spec-note">Apple Silicon (M1 to M5) &amp; Intel Universal .app</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- SECTION 3: Interactive Qt5 Certificate Drop-Zone Simulator (No Eyebrow) -->
+      <section id="simulator" class="simulator-section">
+        <div class="container">
+          <div class="section-header-stack">
+            <h2 class="section-title">Test the Advanced Options panel right here.</h2>
+            <p class="section-subtitle">
+              Click a sample developer certificate preset on the left (or drag any <code>.p12</code> and <code>.mobileprovision</code> file onto the dark Qt5 panel) to see how Sideloadly-Cert validates your identity.
+            </p>
+          </div>
+
+          <div class="simulator-layout">
+            <div class="preset-rack">
+              <div class="preset-rack-title">Sample Certificate Profiles</div>
+              <p class="preset-rack-help">
+                Select a preset to populate the native Qt5 controls:
+              </p>
+
+              <div class="preset-chip-list">
+                <button type="button" class="cert-preset-chip active" data-preset="indie">
+                  <div class="chip-top">
+                    <span>Northstar Labs GmbH</span>
+                    <span class="chip-tag">342d left · 4 UDIDs</span>
+                  </div>
+                  <div class="chip-files">northstar_dist_2027.p12 + adhoc.mobileprovision</div>
+                </button>
+
+                <button type="button" class="cert-preset-chip" data-preset="personal">
+                  <div class="chip-top">
+                    <span>Studio Horizon Dev</span>
+                    <span class="chip-tag">289d left · 1 UDID</span>
+                  </div>
+                  <div class="chip-files">dev_signing.p12 + iphone17pro.mobileprovision</div>
+                </button>
+
+                <button type="button" class="cert-preset-chip" data-preset="enterprise">
+                  <div class="chip-top">
+                    <span>Aether Mobile Core</span>
+                    <span class="chip-tag">364d left · 18 UDIDs</span>
+                  </div>
+                  <div class="chip-files">aether_ios_dev.p12 + wildcard.mobileprovision</div>
+                </button>
+              </div>
+            </div>
+
+            <!-- Interactive Replica of the Injected Qt5 Panel -->
+            <div class="qt5-window-replica" id="qt5-replica-box">
+              <div class="qt5-account-row">
+                <label class="qt5-field-label">Apple ID:</label>
+                <div class="qt5-combo-sim">
+                  <span id="sim-account-combo">[Cert] Northstar Labs GmbH (9K4L8M2P7Q) : northstar_dist_2027.p12</span>
+                  <span class="qt5-combo-arrow" aria-hidden="true">⌄</span>
+                </div>
+              </div>
+
+              <div class="qt5-group-title">
+                Apple Developer Certificate (.p12 + .mobileprovision)
+              </div>
+
+              <div class="qt5-group-box">
+                <div class="qt5-status-banner" id="sim-status-banner">
+                  ✓ Active: Northstar Labs GmbH (9K4L8M2P7Q) | Expires: 2027-10-12 (342d) | UDIDs: 4
+                </div>
+
+                <div class="qt5-form-grid">
+                  <label class="qt5-field-label" for="sim-p12-input">.p12 Certificate:</label>
+                  <input
+                    id="sim-p12-input"
+                    type="text"
+                    class="qt5-input"
+                    value="~/Certs/northstar_dist_2027.p12"
+                    aria-label=".p12 Certificate path"
+                  />
+                  <button type="button" class="qt5-btn" data-sim-trigger="verify">
+                    Upload .p12...
+                  </button>
+
+                  <label class="qt5-field-label" for="sim-prov-input">Mobileprovision:</label>
+                  <input
+                    id="sim-prov-input"
+                    type="text"
+                    class="qt5-input"
+                    value="~/Certs/northstar_adhoc.mobileprovision"
+                    aria-label="Mobileprovision path"
+                  />
+                  <button type="button" class="qt5-btn" data-sim-trigger="verify">
+                    Upload .mobileprovision...
+                  </button>
+
+                  <div class="qt5-password-actions">
+                    <label class="qt5-field-label" for="sim-pass-input">.p12 Password:</label>
+                    <input
+                      id="sim-pass-input"
+                      type="password"
+                      class="qt5-input"
+                      value="••••••••••••"
+                      placeholder="Password (auto from PASSWORD.txt)"
+                    />
+                    <button type="button" class="qt5-btn" id="sim-verify-btn">Apply / Verify</button>
+                    <button type="button" class="qt5-btn" data-sim-trigger="verify">
+                      Upload Folder...
+                    </button>
+                    <button type="button" class="qt5-btn" id="sim-clear-btn">Clear</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- SECTION 4: Asymmetric 4-Cell Bento Grid (Eyebrow #2 of 2 allowed on page) -->
+      <section id="architecture" class="bento-section">
+        <div class="container">
+          <div class="section-header-stack">
+            <div class="eyebrow-kicker">
+              <span>UNDER THE HOOD · QT5 + PYTHON CFFI HOOK</span>
+            </div>
+            <h2 class="section-title">Engineered into Sideloadly, not bolted onto a script.</h2>
+            <p class="section-subtitle">
+              Sideloadly-Cert injects a native Objective-C++ Qt5 widget tree and hooks Python's <code>signpipe</code> in memory so USB and Wi-Fi installations work identically to stock Sideloadly.
+            </p>
+          </div>
+
+          <div class="bento-grid">
+            <!-- Cell 1 (7 cols, visual tint + cropped real screenshot) -->
+            <article class="bento-card bento-span-7 bento-visual-tint">
+              <div>
+                <h3 class="bento-card-title">Drag &amp; drop directly inside Advanced Options</h3>
+                <p class="bento-card-body">
+                  Drop your <code>.p12</code> and <code>.mobileprovision</code> individually, together, or as a folder. The panel expands and collapses in lockstep with Advanced Options so the Start button is never clipped.
+                </p>
+              </div>
+              <img
+                src="./assets/sideloadly-cert-panel.png"
+                alt="Close-up of the Sideloadly-Cert Qt5 panel inside Advanced Options"
+                class="bento-screenshot-crop"
+                loading="lazy"
+              />
+            </article>
+
+            <!-- Cell 2 (5 cols, surface alt + password & keychain logic) -->
+            <article class="bento-card bento-span-5 bento-surface-alt">
+              <div>
+                <h3 class="bento-card-title">Isolated temporary keychain</h3>
+                <p class="bento-card-body">
+                  Your <code>.p12</code> private key is imported into a disposable ephemeral keychain during signing or read from <code>PASSWORD.txt</code> automatically, keeping your login keychain clean.
+                </p>
+              </div>
+              <div class="code-snippet-box">
+                <div><span class="hl-muted"># Ephemeral PKCS#12 verification</span></div>
+                <div>$ openssl pkcs12 -in cert.p12 -nokeys</div>
+                <div><span class="hl-green">MAC verified OK</span></div>
+                <div>subject=UID=9K4L8M2P7Q, CN=Apple Distribution</div>
+                <div><span class="hl-green">✓ Provisioned UDIDs matched: 1</span></div>
+              </div>
+            </article>
+
+            <!-- Cell 3 (5 cols, CMS entitlements extraction) -->
+            <article class="bento-card bento-span-5">
+              <div>
+                <h3 class="bento-card-title">CMS entitlement preservation</h3>
+                <p class="bento-card-body">
+                  Decodes your provisioning profile via <code>security cms -D -i</code>, aligns <code>application-identifier</code> and <code>keychain-access-groups</code>, and embeds <code>embedded.mobileprovision</code>.
+                </p>
+              </div>
+              <div class="code-snippet-box">
+                <div><span class="hl-muted">&lt;!-- Extracted Profile Entitlements --&gt;</span></div>
+                <div>&lt;key&gt;application-identifier&lt;/key&gt;</div>
+                <div>&lt;string&gt;<span class="hl-green">TEAMID.*</span>&lt;/string&gt;</div>
+                <div>&lt;key&gt;get-task-allow&lt;/key&gt;</div>
+                <div>&lt;true/&gt;</div>
+              </div>
+            </article>
+
+            <!-- Cell 4 (7 cols, Recursive Mach-O pipeline) -->
+            <article class="bento-card bento-span-7">
+              <div>
+                <h3 class="bento-card-title">Inside-out Mach-O codesign pipeline</h3>
+                <p class="bento-card-body">
+                  Intercepts <code>GuiImpactor.sign_return_Error</code> after tweak injection and signs every nested binary from deepest dependency to top-level bundle before handing the IPA to Sideloadly's device installer.
+                </p>
+              </div>
+
+              <div class="macho-pipeline-steps">
+                <div class="pipeline-node">
+                  <div class="pipeline-step-num">STEP 01</div>
+                  <div class="pipeline-step-name">Injected Dylibs</div>
+                  <div class="pipeline-step-path">Frameworks/*.dylib &amp; Substrate</div>
+                </div>
+                <div class="pipeline-node">
+                  <div class="pipeline-step-num">STEP 02</div>
+                  <div class="pipeline-step-name">Embedded Frameworks</div>
+                  <div class="pipeline-step-path">Payload/*.app/Frameworks/*.framework</div>
+                </div>
+                <div class="pipeline-node">
+                  <div class="pipeline-step-num">STEP 03</div>
+                  <div class="pipeline-step-name">App Extensions</div>
+                  <div class="pipeline-step-path">Payload/*.app/PlugIns/*.appex</div>
+                </div>
+                <div class="pipeline-node">
+                  <div class="pipeline-step-num">STEP 04</div>
+                  <div class="pipeline-step-name">Main App Bundle</div>
+                  <div class="pipeline-step-path">codesign --force --sign SHA1</div>
+                </div>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- SECTION 5: 2-Column Comparison Matrix (No Eyebrow) -->
+      <section id="comparison" class="comparison-section">
+        <div class="container">
+          <div class="section-header-stack">
+            <h2 class="section-title">Free Apple ID vs. Sideloadly-Cert .p12 Mode</h2>
+            <p class="section-subtitle">
+              Keep every Sideloadly tweak-injection and plist-editing workflow while removing free-account limitations.
+            </p>
+          </div>
+
+          <div class="comparison-grid">
+            <div class="comparison-column">
+              <div class="comparison-col-header">
+                <h3 class="comparison-col-title">Standard Apple ID Mode</h3>
+                <span class="comparison-badge">Free Account</span>
+              </div>
+              <div class="comparison-rows">
+                <div class="comparison-row">
+                  <span class="comp-metric">App Expiration</span>
+                  <span class="comp-result">Every 7 Days</span>
+                </div>
+                <div class="comparison-row">
+                  <span class="comp-metric">Active Apps per Device</span>
+                  <span class="comp-result">Max 3 Apps</span>
+                </div>
+                <div class="comparison-row">
+                  <span class="comp-metric">Authentication</span>
+                  <span class="comp-result">Apple ID + 2FA + Anisette</span>
+                </div>
+                <div class="comparison-row">
+                  <span class="comp-metric">Offline Signing</span>
+                  <span class="comp-result">Requires Apple Server Call</span>
+                </div>
+                <div class="comparison-row">
+                  <span class="comp-metric">Custom Profile Entitlements</span>
+                  <span class="comp-result">Restricted</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="comparison-column featured">
+              <div class="comparison-col-header">
+                <h3 class="comparison-col-title">Sideloadly-Cert (.p12 + Profile)</h3>
+                <span class="comparison-badge">Developer Cert Mode</span>
+              </div>
+              <div class="comparison-rows">
+                <div class="comparison-row">
+                  <span class="comp-metric">App Expiration</span>
+                  <span class="comp-result">Up to 365 Days</span>
+                </div>
+                <div class="comparison-row">
+                  <span class="comp-metric">Active Apps per Device</span>
+                  <span class="comp-result">Unlimited</span>
+                </div>
+                <div class="comparison-row">
+                  <span class="comp-metric">Authentication</span>
+                  <span class="comp-result">Local .p12 + .mobileprovision</span>
+                </div>
+                <div class="comparison-row">
+                  <span class="comp-metric">Offline Signing</span>
+                  <span class="comp-result">100% Local on Your Mac</span>
+                </div>
+                <div class="comparison-row">
+                  <span class="comp-metric">Custom Profile Entitlements</span>
+                  <span class="comp-result">Full CMS Entitlement Sync</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- SECTION 6: Terminal Quick-Install + Final Download Band (No Eyebrow) -->
+      <section id="install" class="install-footer-section">
+        <div class="container">
+          <div class="terminal-install-card">
+            <div>
+              <h2 class="section-title">Ready in 15 seconds on macOS.</h2>
+              <p class="section-subtitle">
+                Download the pre-built <code>Sideloadly-Cert.app</code> bundle, move it to <code>/Applications</code>, and clear the macOS quarantine attribute so the injected Qt5 dylib loads cleanly.
+              </p>
+            </div>
+
+            <div class="terminal-box">
+              <div class="terminal-top-bar">
+                <span>zsh · /Applications</span>
+                <button type="button" class="copy-cmd-btn" id="copy-terminal-btn">
+                  Copy Commands
+                </button>
+              </div>
+              <pre class="terminal-pre" id="terminal-cmd-text"><code>unzip ~/Downloads/Sideloadly-Cert-macOS.zip -d /Applications
+xattr -cr /Applications/Sideloadly-Cert.app
+open /Applications/Sideloadly-Cert.app</code></pre>
+            </div>
+          </div>
+
+          <div class="final-download-band">
+            <div>
+              <h2 class="final-band-title">Get Sideloadly-Cert.app for macOS</h2>
+              <p class="final-band-sub">
+                Includes pre-patched Sideloadly v0.72 + native Qt5 certificate panel + CLI signing tools.
+              </p>
+            </div>
+
+            <a
+              href="https://github.com/timurabi3/Sideloady-with-cert-signing/releases/latest/download/Sideloadly-Cert-macOS.zip"
+              class="hardware-download-btn"
+            >
+              <span class="btn-main-label">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="7 10 12 15 17 10"></polyline>
+                  <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+                <span>Download .app</span>
+              </span>
+              <span class="btn-badge-meta">v1.0.0 · 61 MB</span>
+            </a>
+          </div>
+
+          <footer class="site-footer">
+            <div>Sideloadly-Cert · Open-source macOS certificate signing extension</div>
+            <div class="footer-links">
+              <a href="https://github.com/timurabi3/Sideloady-with-cert-signing" target="_blank" rel="noopener noreferrer">GitHub Repository</a>
+              <a href="https://github.com/timurabi3/Sideloady-with-cert-signing/releases/tag/v1.0.0" target="_blank" rel="noopener noreferrer">Release v1.0.0</a>
+            </div>
+          </footer>
+        </div>
+      </section>
+    </main>
+
+    <script src="./app.js" defer></script>
+  </body>
+</html>
+

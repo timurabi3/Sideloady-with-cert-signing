@@ -1,0 +1,11 @@
+services:
+  sideloadly-cert-web:
+    image: nginx:alpine
+    container_name: sideloadly-cert-web
+    restart: unless-stopped
+    ports:
+      - "8096:80"
+    volumes:
+      - ./:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
