@@ -7,7 +7,7 @@
 
 | # | Version | Status | Notes |
 |---|---------|--------|-------|
-| 1 | **macOS (Intel binary, runs on Silicon via Rosetta 2)** | ✅ **SHIPPED — v1.0.1** | The ONLY possible macOS build today. Works on Intel Macs AND Apple Silicon (M1–M5) through Rosetta 2. |
+| 1 | **macOS (Intel binary, runs on Silicon via Rosetta 2)** | ✅ **SHIPPED — v1.0.2** | The ONLY possible macOS build today. Works on Intel Macs AND Apple Silicon (M1–M5) through Rosetta 2. |
 | 2 | **macOS Apple Silicon (native arm64)** | ⛔ **BLOCKED — waiting on upstream** | Sideloadly itself has NO arm64/universal build (verified: installed v0.72 is x86_64-only; sideloadly.io changelog has zero arm64 mentions — all "Apple Silicon" entries are about sideloading ONTO M-series Macs). We cannot create a Silicon-native version of a closed-source Intel app. |
 | 3 | **Windows 10/11** | ⛔ **BLOCKED — needs new engineering** | Official Sideloadly for Windows exists, but our cert-signing feature is a macOS dylib injection (proxy dylib + Python hook + Qt5 symbol binding). A Windows port needs a different injection mechanism designed from scratch. Later project. |
 
@@ -15,7 +15,7 @@
 
 On Apple Silicon Macs (Timur's is an **M5**), macOS shows this warning dialog when an
 Intel app launches. It means Rosetta 2 will be removed in some FUTURE macOS release.
-The app **runs perfectly fine today** — v1.0.1 was built, launched, and tested on the M5.
+The app **runs perfectly fine today** — v1.0.2 was built, launched, and tested on the M5.
 No reinstall is ever needed because of this dialog.
 
 ## Hard rules for agents (violating these broke the app once before)
@@ -35,6 +35,19 @@ No reinstall is ever needed because of this dialog.
    `build_proxy_dylib()`), rebuild the proxy for the host's arch, re-verify symbols
    against the NEW app's Qt frameworks (they may differ), and ship version 2 of this
    table as the "macOS Silicon" download.
+5. **NEVER resize, unlock (`setMinimumSize`/`setMaximumSize`) or `setFixedSize` the main
+   window from the proxy.** Stock Sideloadly's QMainWindow layout uses
+   `QLayout::SetFixedSize`: the host re-fits the window itself, synchronously inside its
+   "Advanced Options" toggle (600x316 collapsed, 600x<content> expanded, not user-resizable).
+   The certificate box only mirrors the Tweak-Injection Show/Hide event so the host's fit
+   includes it (see "Window sizing" in `src/sideloadly_dylib_proxy.mm`). v1.0.0/v1.0.1 broke
+   this and showed an empty strip on the right plus crushed rows. The certificate box lays
+   out its children with explicit geometry (QLabel/QLineEdit sit in 12pt-taller layout cells
+   on macOS) and must stay compact: the expanded window has to fit a 982pt-high screen.
+6. **Verify GUI changes with REAL mouse clicks.** Accessibility presses (`AXPress`) do not
+   trigger the host's Advanced Options handler. Only one Sideloadly can run at a time
+   (TCP `127.0.0.1:28811`), and a freshly built bundle needs ~2 min on first launch while
+   Rosetta translates it.
 
 ## Current build & release flow (version 1)
 

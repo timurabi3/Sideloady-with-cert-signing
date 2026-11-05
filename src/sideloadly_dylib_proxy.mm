@@ -169,6 +169,11 @@ struct QSize {
     int ht;
 };
 
+// Qt's QRect is four ints: x1, y1, x2, y2 (x2 = x1 + width - 1).
+struct QRect {
+    int x1, y1, x2, y2;
+};
+
 struct QMimeData {
     bool hasUrls() const __asm__("__ZNK9QMimeData7hasUrlsEv");
     QListQUrl urls() const __asm__("__ZNK9QMimeData4urlsEv");
@@ -250,6 +255,11 @@ public:
     // Only the QSize overloads / non-inline symbols are safe.
     void resize(const QSize &s) __asm__("__ZN7QWidget6resizeERK5QSize");
     QSize sizeHint() const __asm__("__ZNK7QWidget8sizeHintEv");
+    QSize minimumSize() const __asm__("__ZNK7QWidget11minimumSizeEv");
+    QSize maximumSize() const __asm__("__ZNK7QWidget11maximumSizeEv");
+    QRect frameGeometry() const __asm__("__ZNK7QWidget13frameGeometryEv");
+    void setGeometry(const QRect &r) __asm__("__ZN7QWidget11setGeometryERK5QRect");
+    void getContentsMargins(int *l, int *t, int *r, int *b) const __asm__("__ZNK7QWidget18getContentsMarginsEPiS0_S0_S0_");
     QWidget *window() const __asm__("__ZNK7QWidget6windowEv");
     bool isVisibleTo(const QWidget *ancestor) const __asm__("__ZNK7QWidget11isVisibleToEPKS_");
 };
@@ -299,6 +309,7 @@ public:
         __asm__("__ZN6QLabelC1ERK7QStringP7QWidget6QFlagsIN2Qt10WindowTypeEE");
     void setText(const QString &text) __asm__("__ZN6QLabel7setTextERK7QString");
     void setWordWrap(bool on) __asm__("__ZN6QLabel11setWordWrapEb");
+    QSize sizeHint() const __asm__("__ZNK6QLabel8sizeHintEv");
 };
 
 class QPushButton : public QWidget {
@@ -307,6 +318,7 @@ public:
         __asm__("__ZN11QPushButtonC1ERK7QStringP7QWidget");
     QString text() const __asm__("__ZNK15QAbstractButton4textEv");
     void setText(const QString &text) __asm__("__ZN15QAbstractButton7setTextERK7QString");
+    QSize sizeHint() const __asm__("__ZNK11QPushButton8sizeHintEv");
 };
 
 class QLineEdit : public QWidget {
@@ -337,6 +349,11 @@ struct QApplication {
     static QList<QWidget *> allWidgets() __asm__("__ZN12QApplication10allWidgetsEv");
 };
 
+class QMainWindow : public QWidget {
+public:
+    QWidget *centralWidget() const __asm__("__ZNK11QMainWindow13centralWidgetEv");
+};
+
 // ---------------------------------------------------------------------------
 // Global UI state pointers for the injected Advanced Options section
 // ---------------------------------------------------------------------------
@@ -353,6 +370,13 @@ static QPushButton *g_btnApply = nullptr;
 static QPushButton *g_btnClear = nullptr;
 static QWidget *g_advContainer = nullptr;
 static QWidget *g_mainWindow = nullptr;
+static QWidget *g_centralWidget = nullptr;   // host QMainWindow central widget (lazily resolved)
+static QLabel *g_measureLabel = nullptr;     // hidden helper: measures the banner text width
+static int g_bannerH = 0;                    // current banner height (one or two lines)
+static int g_certBoxH = 0;                   // current (fixed) height of the certificate box
+static QLabel *g_lblP12 = nullptr;           // row captions of the certificate box
+static QLabel *g_lblProv = nullptr;
+static QLabel *g_lblPass = nullptr;
 
 static NSString *jsonEscape(NSString *s) {
     if (!s) return @"";
@@ -375,71 +399,252 @@ static void runPythonCode(NSString *pyCode) {
 }
 
 // ---------------------------------------------------------------------------
-// Window resize handling (fix for the "big empty space" bug)
+// Window sizing — let the host do it
 //
-// Root cause of the old bug: the window was locked via setFixedSize() to a
-// sizeHint() snapshot, and this ran again on EVERY Show/Hide of the "Tweak
-// Injection" box — including spurious pairs Qt delivers during window moves,
-// occlusion and minimize/restore. A word-wrapped label can produce a wildly
-// oversized (height-for-width) sizeHint before the layout settles, so the
-// window occasionally got locked far taller than its content, and because the
-// size was FIXED it never recovered and could not be resized by the user.
+// Sideloadly's main window is a QMainWindow whose layout uses
+// QLayout::SetFixedSize: the window is locked to its content and snaps to
+// 600x316 (collapsed) / 600x<content> (Advanced Options open) each time the
+// user toggles "Advanced Options". The host performs that fit synchronously
+// inside its own toggle handler, while it shows/hides the Advanced panel.
 //
-// Fix strategy:
-//   1. Only react to real advanced-visibility *state transitions* (debounce).
-//   2. Never setFixedSize — keep the window user-resizable; resize() only.
-//   3. Clamp the computed size to absolute sane bands so a poisoned sizeHint
-//      can never blow the window up again.
+// The injected certificate box therefore must NOT touch the window's
+// min/max/size at all. (The previous code unlocked the host's size limits,
+// forced a >= 720pt wide window and resized from a stale sizeHint — that is
+// what produced the empty strip on the right, crushed rows and a window that
+// could not hold its own content.) All the box has to guarantee is:
+//   1. it lives inside the Advanced layout (it does), and
+//   2. its visibility already matches the Advanced state *before* the host's
+//      fit runs. The Show/Hide event of the "Tweak Injection" box is delivered
+//      synchronously inside the host's toggle, so mirroring it there suffices.
+//
+// The one case the host cannot cover is a change of the box's own height while
+// Advanced is already open (the status banner switching between one and two
+// lines): the host pinned the central widget to a fixed height at toggle time.
+// refitCentralToHint() re-pins it to the layout's current hint — exactly what
+// the host does — and is a no-op whenever nothing changed.
 // ---------------------------------------------------------------------------
-static int g_advOpenState = -1;   // -1 unknown, 0 advanced closed, 1 advanced open
+static QWidget *centralWidgetOrNull() {
+    if (g_centralWidget) {
+        return g_centralWidget;
+    }
+    if (!g_mainWindow || !g_mainWindow->metaObject()) {
+        return nullptr;
+    }
+    const char *cls = g_mainWindow->metaObject()->className();
+    if (!cls || strcmp(cls, "QMainWindow") != 0) {
+        return nullptr;
+    }
+    g_centralWidget = static_cast<QMainWindow *>(g_mainWindow)->centralWidget();
+    return g_centralWidget;
+}
 
-static void adjustMainWindowForAdvanced(bool advOpen) {
-    if (!g_mainWindow || !g_tweakBox || !g_certGroupBox) {
+static bool advancedPanelOpen() {
+    return g_mainWindow && g_tweakBox && g_tweakBox->isVisibleTo(g_mainWindow);
+}
+
+static void refitCentralToHint() {
+    if (!g_certGroupBox || !advancedPanelOpen()) {
+        return;  // Advanced closed: the host's compact fit is already right
+    }
+    QWidget *cw = centralWidgetOrNull();
+    if (!cw) {
         return;
     }
-    const int want = advOpen ? 1 : 0;
-    if (g_advOpenState == want) {
-        return;  // spurious Show/Hide pair (window move/occlusion) — no resize
+    QSize mn = cw->minimumSize();
+    QSize mx = cw->maximumSize();
+    if (mn.ht <= 0 || mn.wd != mx.wd || mn.ht != mx.ht) {
+        return;  // the host has not pinned a size (yet): nothing to correct
     }
-
-    g_certGroupBox->setVisible(advOpen);
-
-    // Unlock any fixed size the host app set, but keep the window freely
-    // user-resizable (setFixedSize is what made the breakage permanent).
-    g_mainWindow->setMinimumSize(600, 400);
-    g_mainWindow->setMaximumSize(16777215, 16777215);
-
-    // Force a clean layout pass so sizeHint() reflects the new visibility.
-    if (QLayout *top = g_mainWindow->layout()) {
-        top->activate();
+    QSize hint = cw->sizeHint();
+    if (hint.ht <= 0) {
+        return;
     }
-
-    QSize sh = g_mainWindow->sizeHint();
-    if (sh.wd <= 0 || sh.ht <= 0) {
-        return;  // hint unavailable — leave the window as-is
+    const int delta = hint.ht - mn.ht;
+    if (delta == 0 || delta < -400 || delta > 400) {
+        return;  // already consistent, or an implausible hint: leave the host's size alone
     }
+    cw->setFixedSize(mn.wd, hint.ht);
+}
 
-    // Width: hint + 10% breathing room, clamped to a sane band.
-    int targetW = (sh.wd * 11) / 10;
-    if (targetW < 720) targetW = 720;
-    if (targetW > 1280) targetW = 1280;
+static void scheduleCentralRefit() {
+    // Qt delivers LayoutRequest events asynchronously: look again once the
+    // layouts have settled.
+    const double delays[] = {0.06, 0.30};
+    for (double d : delays) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(d * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            refitCentralToHint();
+        });
+    }
+}
 
-    // Height: absolute sane bands. Closed: 480..1150. Open: closed band plus
-    // headroom for the injected certificate section (capped word-wrap label
-    // keeps its hint honest; the clamps are the backstop).
-    int targetH = sh.ht;
-    const int minClosedH = 480;
-    const int maxClosedH = 1150;
-    const int advHeadroom = 560;
-    if (targetH < minClosedH) targetH = minClosedH;
-    int maxH = advOpen ? (maxClosedH + advHeadroom) : maxClosedH;
-    if (targetH > maxH) targetH = maxH;
+// ---------------------------------------------------------------------------
+// Compact certificate panel
+//
+// The box positions its children explicitly instead of using QLayouts: with the
+// macOS style every QLabel / QLineEdit occupies a layout cell that is 12pt taller
+// than the widget, which turned three 24pt rows into 36pt rows and made the
+// window taller than a laptop screen. The host window is fixed at 600pt wide, so
+// explicit geometry is both simpler and exact. The box's own height is fixed
+// (min == max), which keeps the host's SetFixedSize fit deterministic.
+// ---------------------------------------------------------------------------
+static const int kRowH = 24;         // every edit / button / label row (the Aqua button bezel needs >= 24)
+static const int kBanner1H = 24;     // status banner, one line
+static const int kBanner2H = 40;     // status banner, two lines
+static const int kBannerFitW = 526;  // usable width (pt) of one banner line (the label is 530pt wide), incl. a safety margin
+static const int kPanelPadX = 8;     // inner left / right padding
+static const int kPanelPadTop = 3;
+static const int kPanelPadBottom = 3;
+static const int kPanelGap = 2;      // vertical gap between banner and rows
+static const int kPanelHGap = 6;     // horizontal gap inside a row
+static const int kLabelW = 110;      // row caption width
+static const int kMinEditW = 60;
 
-    QSize target;
-    target.wd = targetW;
-    target.ht = targetH;
-    g_mainWindow->resize(target);
-    g_advOpenState = want;
+static QRect makeRect(int x, int y, int w, int h) {
+    QRect r;
+    r.x1 = x;
+    r.y1 = y;
+    r.x2 = x + w - 1;
+    r.y2 = y + h - 1;
+    return r;
+}
+
+// Fix the box's height (min == max) for the current banner height.
+static void applyCertBoxHeight() {
+    if (!g_certGroupBox) {
+        return;
+    }
+    int ml = 0, mt = 0, mr = 0, mb = 0;
+    g_certGroupBox->getContentsMargins(&ml, &mt, &mr, &mb);
+    const int h = mt + kPanelPadTop + g_bannerH + kPanelGap + 3 * kRowH + 2 * kPanelGap + kPanelPadBottom + mb;
+    if (h == g_certBoxH) {
+        return;
+    }
+    g_certBoxH = h;
+    g_certGroupBox->setMinimumSize(0, h);
+    g_certGroupBox->setMaximumSize(16777215, h);
+    scheduleCentralRefit();  // the box height changed while Advanced may be open
+}
+
+// Place the banner and the three rows: [caption][edit .........][button(s)].
+// Buttons are right-aligned at their natural width, the edit takes the rest.
+static void layoutCertPanel() {
+    if (!g_certGroupBox || !g_statusLabel || !g_btnApply || !g_btnClear) {
+        return;
+    }
+    const QRect gf = g_certGroupBox->frameGeometry();
+    const int boxW = gf.x2 - gf.x1 + 1;
+    if (boxW < 300) {
+        return;  // the host has not sized the box yet; the Resize event calls us again
+    }
+    int ml = 0, mt = 0, mr = 0, mb = 0;
+    g_certGroupBox->getContentsMargins(&ml, &mt, &mr, &mb);
+    const int x0 = ml + kPanelPadX;
+    const int w = boxW - ml - mr - 2 * kPanelPadX;
+    int y = mt + kPanelPadTop;
+
+    g_statusLabel->setGeometry(makeRect(x0, y, w, g_bannerH));
+    y += g_bannerH + kPanelGap;
+
+    auto placeRow = [&](QWidget *caption, QWidget *edit, QPushButton *btnA, QPushButton *btnB) {
+        int right = x0 + w;
+        if (btnB) {
+            const int bw = btnB->sizeHint().wd;
+            btnB->setGeometry(makeRect(right - bw, y, bw, kRowH));
+            right -= bw + kPanelHGap;
+        }
+        const int aw = btnA->sizeHint().wd;
+        btnA->setGeometry(makeRect(right - aw, y, aw, kRowH));
+        right -= aw + kPanelHGap;
+        caption->setGeometry(makeRect(x0, y, kLabelW, kRowH));
+        const int ex = x0 + kLabelW + kPanelHGap;
+        int ew = right - ex;
+        if (ew < kMinEditW) {
+            ew = kMinEditW;
+        }
+        edit->setGeometry(makeRect(ex, y, ew, kRowH));
+        y += kRowH + kPanelGap;
+    };
+    placeRow(g_lblP12, g_p12Edit, g_btnUploadP12, nullptr);
+    placeRow(g_lblProv, g_provEdit, g_btnUploadProv, nullptr);
+    placeRow(g_lblPass, g_passEdit, g_btnApply, g_btnClear);
+}
+
+static size_t utf8Length(const std::string &s) {
+    size_t n = 0;
+    for (unsigned char c : s) {
+        if ((c & 0xC0) != 0x80) ++n;
+    }
+    return n;
+}
+
+// Byte length of the first `chars` UTF-8 code points of `s`.
+static size_t utf8Prefix(const std::string &s, size_t chars) {
+    size_t i = 0, n = 0;
+    while (i < s.size() && n < chars) {
+        unsigned char c = (unsigned char)s[i];
+        i += (c < 0x80) ? 1 : ((c >> 5) == 0x6) ? 2 : ((c >> 4) == 0xE) ? 3 : ((c >> 3) == 0x1E) ? 4 : 1;
+        ++n;
+    }
+    return i > s.size() ? s.size() : i;
+}
+
+static const char *bannerStyleFor(const std::string &state) {
+    if (state == "active") {
+        return "QLabel { border: 1px dashed #2ecc71; border-radius: 5px; padding: 2px 6px; color: #2ecc71; font-weight: 600; }";
+    }
+    if (state == "staged" || state == "need_password") {
+        return "QLabel { border: 1px dashed #f39c12; border-radius: 5px; padding: 2px 6px; color: #f39c12; font-weight: 600; }";
+    }
+    if (state == "error") {
+        return "QLabel { border: 1px dashed #e74c3c; border-radius: 5px; padding: 2px 6px; color: #e74c3c; font-weight: 600; }";
+    }
+    return "QLabel { border: 1px dashed #3a86ff; border-radius: 5px; padding: 2px 6px; }";
+}
+
+// Show `text` in the banner: one line when it fits, two lines when it does
+// not (and an ellipsis + full-text tooltip beyond that). The banner height is
+// always an explicit value, never derived from word-wrap size hints.
+static void setBanner(const std::string &text, const std::string &state) {
+    if (!g_statusLabel) {
+        return;
+    }
+    const QString style = QString::fromUtf8(bannerStyleFor(state));
+    g_statusLabel->setStyleSheet(style);
+
+    int lines = 1;
+    std::string shown = text;
+    bool elided = false;
+    if (g_measureLabel) {
+        g_measureLabel->setStyleSheet(style);
+        g_measureLabel->setText(QString::fromUtf8(text.c_str()));
+        const int needW = g_measureLabel->sizeHint().wd;
+        if (needW <= 0) {
+            lines = 2;
+        } else if (needW > kBannerFitW) {
+            lines = 2;
+            const int twoLineW = 2 * kBannerFitW - 70;  // word-wrap wastes a little of each line
+            if (needW > twoLineW) {
+                const size_t total = utf8Length(text);
+                size_t keep = (size_t)((double)total * (double)twoLineW / (double)needW);
+                if (keep < 8) keep = 8;
+                if (keep < total) {
+                    shown = text.substr(0, utf8Prefix(text, keep));
+                    while (!shown.empty() && shown.back() == ' ') shown.pop_back();
+                    shown += "\xE2\x80\xA6";  // "…"
+                    elided = true;
+                }
+            }
+        }
+    }
+    g_statusLabel->setText(QString::fromUtf8(shown.c_str()));
+    g_statusLabel->setToolTip(QString::fromUtf8(elided ? text.c_str() : ""));
+
+    const int h = (lines == 1) ? kBanner1H : kBanner2H;
+    if (h != g_bannerH) {
+        g_bannerH = h;
+        applyCertBoxHeight();
+        layoutCertPanel();
+    }
 }
 
 static void refreshUiFromState() {
@@ -469,26 +674,7 @@ static void refreshUiFromState() {
     if (g_provEdit) {
         g_provEdit->setText(QString::fromUtf8([provPath UTF8String]));
     }
-    if (g_statusLabel) {
-        g_statusLabel->setText(QString::fromUtf8([statusText UTF8String]));
-        if ([statusState isEqualToString:@"active"]) {
-            g_statusLabel->setStyleSheet(QString::fromUtf8(
-                "QLabel { border: 1px dashed #2ecc71; border-radius: 5px; padding: 6px; color: #2ecc71; font-weight: 600; }"
-            ));
-        } else if ([statusState isEqualToString:@"staged"] || [statusState isEqualToString:@"need_password"]) {
-            g_statusLabel->setStyleSheet(QString::fromUtf8(
-                "QLabel { border: 1px dashed #f39c12; border-radius: 5px; padding: 6px; color: #f39c12; font-weight: 600; }"
-            ));
-        } else if ([statusState isEqualToString:@"error"]) {
-            g_statusLabel->setStyleSheet(QString::fromUtf8(
-                "QLabel { border: 1px dashed #e74c3c; border-radius: 5px; padding: 6px; color: #e74c3c; font-weight: 600; }"
-            ));
-        } else {
-            g_statusLabel->setStyleSheet(QString::fromUtf8(
-                "QLabel { border: 1px dashed #3a86ff; border-radius: 5px; padding: 6px; }"
-            ));
-        }
-    }
+    setBanner(std::string([statusText UTF8String]), std::string([statusState UTF8String]));
 
     // Sync the Apple ID QComboBox when a certificate is active
     if ([activeLabel length] > 0) {
@@ -654,6 +840,13 @@ public:
         }
         int evType = event->type();
 
+        // The host sized (or re-sized) the certificate box: place banner and rows.
+        if (watched == g_certGroupBox && evType == 14) {  // QEvent::Resize
+            applyCertBoxHeight();
+            layoutCertPanel();
+            return false;
+        }
+
         // QEvent::DragEnter (60) or QEvent::DragMove (61)
         if (evType == 60 || evType == 61) {
             QDropEvent *dropEv = static_cast<QDropEvent *>(event);
@@ -695,17 +888,20 @@ public:
             }
         }
 
-        // Mirror "Tweak Injection" Show (17) / Hide (18) when user clicks "Advanced Options".
-        // Only genuine state transitions reach adjustMainWindowForAdvanced();
-        // spurious Show/Hide pairs (window move, occlusion, minimize) are debounced inside.
+        // Mirror the host's "Advanced Options" toggle (the "Tweak Injection" box
+        // Show (17) / Hide (18)) on the certificate box. This runs synchronously
+        // inside the host's toggle, before the host fits its window, so the
+        // host's own SetFixedSize fit already includes the box (see "Window
+        // sizing" above). Spontaneous events (minimize, occlusion, window move)
+        // are ignored.
         if (watched == g_tweakBox && (evType == 17 || evType == 18)) {
-            const bool nowOpen = (evType == 17);
-            if (g_certGroupBox) {
+            if (!(event->flags & 0x02) && g_certGroupBox) {  // 0x02 == QEvent::spont
+                const bool nowOpen = (evType == 17);
                 g_certGroupBox->setVisible(nowOpen);
+                if (nowOpen) {
+                    scheduleCentralRefit();  // safety net; a no-op when the host's fit already included the box
+                }
             }
-            dispatch_async(dispatch_get_main_queue(), ^{
-                adjustMainWindowForAdvanced(nowOpen);
-            });
             return false;
         }
 
@@ -802,34 +998,20 @@ static void injectAdvancedOptionsCertBoxIfNeeded() {
         "Drag & drop your Apple Developer .p12 certificate and .mobileprovision profile here, or click the Upload buttons."
     ));
 
-    QVBoxLayout *certVBox = new QVBoxLayout(g_certGroupBox);
-    certVBox->setSpacing(6);
-    certVBox->setContentsMargins(8, 8, 8, 8);
+    // The box positions its children explicitly: see layoutCertPanel().
 
-    // 1. Drag & Drop Banner / Status Label
-    g_statusLabel = new QLabel(
-        QString::fromUtf8("Drag & drop .p12 and .mobileprovision files here, or click Upload below."),
-        g_certGroupBox,
-        0
-    );
+    // 1. Drag & Drop Banner / Status Label (text, colour and one/two-line
+    //    height are all applied by setBanner())
+    g_statusLabel = new QLabel(QString::fromUtf8(""), g_certGroupBox, 0);
     g_statusLabel->setWordWrap(true);
-    // Cap the word-wrapped label's height: heightForWidth() labels can report
-    // enormous sizeHints before the layout settles, which previously blew up
-    // the window-size math. 3 lines max keeps the hint honest.
-    g_statusLabel->setMinimumSize(0, 44);
-    g_statusLabel->setMaximumSize(16777215, 84);
     g_statusLabel->setAcceptDrops(true);
     g_statusLabel->installEventFilter(g_qtFilter);
-    g_statusLabel->setStyleSheet(QString::fromUtf8(
-        "QLabel { border: 1px dashed #3a86ff; border-radius: 5px; padding: 6px; }"
-    ));
-    certVBox->addWidget(g_statusLabel, 0, 0);
+    // Hidden, never positioned: only used to measure how wide a banner text is.
+    g_measureLabel = new QLabel(QString::fromUtf8(""), g_certGroupBox, 0);
+    g_measureLabel->setVisible(false);
 
     // 2. Row: .p12 Certificate path + Upload .p12 button
-    QHBoxLayout *rowP12 = new QHBoxLayout();
-    rowP12->setSpacing(6);
-    QLabel *lblP12 = new QLabel(QString::fromUtf8(".p12 Certificate:"), g_certGroupBox, 0);
-    lblP12->setMinimumSize(110, 0);
+    g_lblP12 = new QLabel(QString::fromUtf8(".p12 Certificate:"), g_certGroupBox, 0);
     g_p12Edit = new QLineEdit(g_certGroupBox);
     g_p12Edit->setReadOnly(true);
     g_p12Edit->setPlaceholderText(QString::fromUtf8("Drag & drop .p12 file here or click Upload .p12..."));
@@ -839,16 +1021,8 @@ static void injectAdvancedOptionsCertBoxIfNeeded() {
     g_btnUploadP12 = new QPushButton(QString::fromUtf8("Upload .p12..."), g_certGroupBox);
     g_btnUploadP12->installEventFilter(g_qtFilter);
 
-    rowP12->addWidget(lblP12, 0, 0);
-    rowP12->addWidget(g_p12Edit, 1, 0);
-    rowP12->addWidget(g_btnUploadP12, 0, 0);
-    certVBox->addLayout(rowP12, 0);
-
     // 3. Row: .mobileprovision path + Upload .mobileprovision button
-    QHBoxLayout *rowProv = new QHBoxLayout();
-    rowProv->setSpacing(6);
-    QLabel *lblProv = new QLabel(QString::fromUtf8("Mobileprovision:"), g_certGroupBox, 0);
-    lblProv->setMinimumSize(110, 0);
+    g_lblProv = new QLabel(QString::fromUtf8("Mobileprovision:"), g_certGroupBox, 0);
     g_provEdit = new QLineEdit(g_certGroupBox);
     g_provEdit->setReadOnly(true);
     g_provEdit->setPlaceholderText(QString::fromUtf8("Drag & drop .mobileprovision here or click Upload Profile..."));
@@ -858,16 +1032,8 @@ static void injectAdvancedOptionsCertBoxIfNeeded() {
     g_btnUploadProv = new QPushButton(QString::fromUtf8("Upload .mobileprovision..."), g_certGroupBox);
     g_btnUploadProv->installEventFilter(g_qtFilter);
 
-    rowProv->addWidget(lblProv, 0, 0);
-    rowProv->addWidget(g_provEdit, 1, 0);
-    rowProv->addWidget(g_btnUploadProv, 0, 0);
-    certVBox->addLayout(rowProv, 0);
-
     // 4. Row: Password input + Apply / Verify + Clear
-    QHBoxLayout *rowPass = new QHBoxLayout();
-    rowPass->setSpacing(6);
-    QLabel *lblPass = new QLabel(QString::fromUtf8(".p12 Password:"), g_certGroupBox, 0);
-    lblPass->setMinimumSize(110, 0);
+    g_lblPass = new QLabel(QString::fromUtf8(".p12 Password:"), g_certGroupBox, 0);
     g_passEdit = new QLineEdit(g_certGroupBox);
     qt_lineedit_set_echo_mode(g_passEdit, 2); // QLineEdit::Password = 2
     g_passEdit->setPlaceholderText(QString::fromUtf8("Enter password (or auto from PASSWORD.txt)"));
@@ -880,24 +1046,20 @@ static void injectAdvancedOptionsCertBoxIfNeeded() {
     g_btnClear = new QPushButton(QString::fromUtf8("Clear"), g_certGroupBox);
     g_btnClear->installEventFilter(g_qtFilter);
 
-    rowPass->addWidget(lblPass, 0, 0);
-    rowPass->addWidget(g_passEdit, 1, 0);
-    rowPass->addWidget(g_btnApply, 0, 0);
-    rowPass->addWidget(g_btnClear, 0, 0);
-    certVBox->addLayout(rowPass, 0);
+    setBanner("Drag & drop .p12 and .mobileprovision files here, or click Upload below.", "idle");
+    applyCertBoxHeight();
+    layoutCertPanel();
 
     // Insert right below "Tweak Injection" in the Advanced Options layout
     advLayout->insertWidget(tweakIdx + 1, g_certGroupBox, 0, 0);
     g_certGroupBox->setVisible(g_mainWindow ? tweakBox->isVisibleTo(g_mainWindow) : false);
 
     refreshUiFromState();
-    // Seed the advanced-state tracker WITHOUT resizing: the host app sizes its
-    // own startup window (600x316 compact) deliberately smaller than the raw
-    // layout sizeHint, and resizing here bloated the window at launch. The
-    // window is only resized on real user-driven state transitions.
-    if (g_mainWindow) {
-        g_advOpenState = tweakBox->isVisibleTo(g_mainWindow) ? 1 : 0;
-    }
+    // No window resizing here: the host sizes its own window. Only if the
+    // Advanced panel is *already open* at injection time (the host's fit ran
+    // before the box existed) is the pinned central height corrected, once the
+    // layouts have settled.
+    scheduleCentralRefit();
 }
 
 // ---------------------------------------------------------------------------
