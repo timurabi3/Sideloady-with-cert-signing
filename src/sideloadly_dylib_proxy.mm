@@ -244,6 +244,11 @@ public:
     void setMaximumSize(int maxw, int maxh) __asm__("__ZN7QWidget14setMaximumSizeEii");
     void setFixedSize(int w, int h) __asm__("__ZN7QWidget12setFixedSizeEii");
     void adjustSize() __asm__("__ZN7QWidget10adjustSizeEv");
+    // NOTE: QWidget::resize(int,int), width(), height() and isVisible() are
+    // INLINE in Qt 5.15 — they are not exported by QtWidgets.framework and
+    // must never be declared here (dynamic_lookup would crash at call time).
+    // Only the QSize overloads / non-inline symbols are safe.
+    void resize(const QSize &s) __asm__("__ZN7QWidget6resizeERK5QSize");
     QSize sizeHint() const __asm__("__ZNK7QWidget8sizeHintEv");
     QWidget *window() const __asm__("__ZNK7QWidget6windowEv");
     bool isVisibleTo(const QWidget *ancestor) const __asm__("__ZNK7QWidget11isVisibleToEPKS_");
@@ -255,6 +260,7 @@ public:
     int indexOf(QWidget *w) const __asm__("__ZNK7QLayout7indexOfEP7QWidget");
     void setContentsMargins(int left, int top, int right, int bottom)
         __asm__("__ZN7QLayout18setContentsMarginsEiiii");
+    bool activate() __asm__("__ZN7QLayout8activateEv");
 };
 
 class QBoxLayout : public QLayout {
@@ -368,21 +374,72 @@ static void runPythonCode(NSString *pyCode) {
     PyGILState_Release(gstate);
 }
 
-static void adjustMainWindowIfAdvancedVisible() {
+// ---------------------------------------------------------------------------
+// Window resize handling (fix for the "big empty space" bug)
+//
+// Root cause of the old bug: the window was locked via setFixedSize() to a
+// sizeHint() snapshot, and this ran again on EVERY Show/Hide of the "Tweak
+// Injection" box — including spurious pairs Qt delivers during window moves,
+// occlusion and minimize/restore. A word-wrapped label can produce a wildly
+// oversized (height-for-width) sizeHint before the layout settles, so the
+// window occasionally got locked far taller than its content, and because the
+// size was FIXED it never recovered and could not be resized by the user.
+//
+// Fix strategy:
+//   1. Only react to real advanced-visibility *state transitions* (debounce).
+//   2. Never setFixedSize — keep the window user-resizable; resize() only.
+//   3. Clamp the computed size to absolute sane bands so a poisoned sizeHint
+//      can never blow the window up again.
+// ---------------------------------------------------------------------------
+static int g_advOpenState = -1;   // -1 unknown, 0 advanced closed, 1 advanced open
+
+static void adjustMainWindowForAdvanced(bool advOpen) {
     if (!g_mainWindow || !g_tweakBox || !g_certGroupBox) {
         return;
     }
-    bool advOpen = g_tweakBox->isVisibleTo(g_mainWindow);
-    g_certGroupBox->setVisible(advOpen);
-    g_mainWindow->setMinimumSize(750, 0);
-    g_mainWindow->setMaximumSize(16777215, 16777215);
-    g_mainWindow->adjustSize();
-    QSize sh = g_mainWindow->sizeHint();
-    if (sh.ht > 0) {
-        int targetW = (sh.wd * 11) / 10;
-        if (targetW < 750) targetW = 750;
-        g_mainWindow->setFixedSize(targetW, sh.ht);
+    const int want = advOpen ? 1 : 0;
+    if (g_advOpenState == want) {
+        return;  // spurious Show/Hide pair (window move/occlusion) — no resize
     }
+
+    g_certGroupBox->setVisible(advOpen);
+
+    // Unlock any fixed size the host app set, but keep the window freely
+    // user-resizable (setFixedSize is what made the breakage permanent).
+    g_mainWindow->setMinimumSize(600, 400);
+    g_mainWindow->setMaximumSize(16777215, 16777215);
+
+    // Force a clean layout pass so sizeHint() reflects the new visibility.
+    if (QLayout *top = g_mainWindow->layout()) {
+        top->activate();
+    }
+
+    QSize sh = g_mainWindow->sizeHint();
+    if (sh.wd <= 0 || sh.ht <= 0) {
+        return;  // hint unavailable — leave the window as-is
+    }
+
+    // Width: hint + 10% breathing room, clamped to a sane band.
+    int targetW = (sh.wd * 11) / 10;
+    if (targetW < 720) targetW = 720;
+    if (targetW > 1280) targetW = 1280;
+
+    // Height: absolute sane bands. Closed: 480..1150. Open: closed band plus
+    // headroom for the injected certificate section (capped word-wrap label
+    // keeps its hint honest; the clamps are the backstop).
+    int targetH = sh.ht;
+    const int minClosedH = 480;
+    const int maxClosedH = 1150;
+    const int advHeadroom = 560;
+    if (targetH < minClosedH) targetH = minClosedH;
+    int maxH = advOpen ? (maxClosedH + advHeadroom) : maxClosedH;
+    if (targetH > maxH) targetH = maxH;
+
+    QSize target;
+    target.wd = targetW;
+    target.ht = targetH;
+    g_mainWindow->resize(target);
+    g_advOpenState = want;
 }
 
 static void refreshUiFromState() {
@@ -638,13 +695,16 @@ public:
             }
         }
 
-        // Mirror "Tweak Injection" Show (17) / Hide (18) when user clicks "Advanced Options"
+        // Mirror "Tweak Injection" Show (17) / Hide (18) when user clicks "Advanced Options".
+        // Only genuine state transitions reach adjustMainWindowForAdvanced();
+        // spurious Show/Hide pairs (window move, occlusion, minimize) are debounced inside.
         if (watched == g_tweakBox && (evType == 17 || evType == 18)) {
+            const bool nowOpen = (evType == 17);
             if (g_certGroupBox) {
-                g_certGroupBox->setVisible(evType == 17);
+                g_certGroupBox->setVisible(nowOpen);
             }
             dispatch_async(dispatch_get_main_queue(), ^{
-                adjustMainWindowIfAdvancedVisible();
+                adjustMainWindowForAdvanced(nowOpen);
             });
             return false;
         }
@@ -753,6 +813,11 @@ static void injectAdvancedOptionsCertBoxIfNeeded() {
         0
     );
     g_statusLabel->setWordWrap(true);
+    // Cap the word-wrapped label's height: heightForWidth() labels can report
+    // enormous sizeHints before the layout settles, which previously blew up
+    // the window-size math. 3 lines max keeps the hint honest.
+    g_statusLabel->setMinimumSize(0, 44);
+    g_statusLabel->setMaximumSize(16777215, 84);
     g_statusLabel->setAcceptDrops(true);
     g_statusLabel->installEventFilter(g_qtFilter);
     g_statusLabel->setStyleSheet(QString::fromUtf8(
@@ -826,7 +891,13 @@ static void injectAdvancedOptionsCertBoxIfNeeded() {
     g_certGroupBox->setVisible(g_mainWindow ? tweakBox->isVisibleTo(g_mainWindow) : false);
 
     refreshUiFromState();
-    adjustMainWindowIfAdvancedVisible();
+    // Seed the advanced-state tracker WITHOUT resizing: the host app sizes its
+    // own startup window (600x316 compact) deliberately smaller than the raw
+    // layout sizeHint, and resizing here bloated the window at launch. The
+    // window is only resized on real user-driven state transitions.
+    if (g_mainWindow) {
+        g_advOpenState = tweakBox->isVisibleTo(g_mainWindow) ? 1 : 0;
+    }
 }
 
 // ---------------------------------------------------------------------------
